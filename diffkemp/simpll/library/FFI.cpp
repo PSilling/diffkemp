@@ -47,6 +47,7 @@ void runSimpLL(std::unique_ptr<Module> ModL,
                   ModLOut,
                   ModROut,
                   Conf.CacheDir,
+                  Conf.PatternsFile,
                   Conf.Variable,
                   Conf.OutputLlvmIR,
                   Conf.ControlFlowOnly,
@@ -96,7 +97,7 @@ template <class T> struct ptr_array stringContainerToPtrArray(T Container) {
 extern "C" {
 void *loadModule(const char *Path) {
     std::string PathString(Path);
-    Module * LoadedModule = loadModule(PathString, ModuleMap, ContextMap);
+    Module *LoadedModule = loadModule(PathString, ModuleMap, ContextMap);
     return (void *)LoadedModule;
 }
 
