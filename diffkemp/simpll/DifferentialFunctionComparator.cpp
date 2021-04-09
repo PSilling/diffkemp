@@ -825,12 +825,11 @@ int DifferentialFunctionComparator::cmpBasicBlocks(
         // Skip instructions matched to a pattern because such instructions have
         // been analyzed by the pattern function comparator and have already
         // been mapped according to the pattern.
-        if (isPartOfPattern(&*InstL)) {
-            InstL++;
-            continue;
-        }
-        if (isPartOfPattern(&*InstR)) {
-            InstR++;
+        if (isPartOfPattern(&*InstL) || isPartOfPattern(&*InstR)) {
+            while (InstL != InstLE && isPartOfPattern(&*InstL))
+                InstL++;
+            while (InstR != InstRE && isPartOfPattern(&*InstR))
+                InstR++;
             continue;
         }
 
@@ -880,7 +879,8 @@ int DifferentialFunctionComparator::cmpBasicBlocks(
                 sn_mapR.erase(&*InstR);
                 snPairMap.erase(sn_mapL.size());
                 createPatternMapping();
-                continue;
+                if (isPartOfPattern(&*InstL) || isPartOfPattern(&*InstR))
+                    continue;
             }
 
             if (Res) {

@@ -93,7 +93,9 @@ int InstPatternComparator::cmpInputValues(const Value *L, const Value *R) {
 
         while (UserL != UserLE && UserR != UserRE) {
             // Skip pattern users that do not reperesent input values.
-            if (ParentPattern->MetadataMap[*UserR].NotAnInput) {
+            auto UserRMetadata = ParentPattern->MetadataMap.find(*UserR);
+            if (UserRMetadata != ParentPattern->MetadataMap.end()
+                && UserRMetadata->second.NotAnInput) {
                 ++UserR;
                 continue;
             }
@@ -169,9 +171,11 @@ int InstPatternComparator::cmpGEPs(const GEPOperator *GEPL,
     // When using the GEP operations on pointers, vectors or arrays, perform the
     // default comparison. Also use the default comparison if the name-based
     // structure comparison is disabled.
+    auto GEPRMetadata = ParentPattern->MetadataMap.find(GEPR);
     if (!GEPL->getSourceElementType()->isStructTy()
         || !GEPR->getSourceElementType()->isStructTy()
-        || ParentPattern->MetadataMap[GEPR].DisableNameComparison) {
+        || (GEPRMetadata != ParentPattern->MetadataMap.end()
+            && GEPRMetadata->second.DisableNameComparison)) {
         return FunctionComparator::cmpGEPs(GEPL, GEPR);
     }
 
@@ -255,8 +259,9 @@ int InstPatternComparator::cmpBasicBlocks(const BasicBlock *BBL,
         PositionR = &*InstR;
 
         // Check whether the compared pattern ends at this instruction.
-        auto InstMetadata = ParentPattern->MetadataMap[&*InstR];
-        if (InstMetadata.PatternEnd)
+        auto InstRMetadata = ParentPattern->MetadataMap.find(&*InstR);
+        if (InstRMetadata != ParentPattern->MetadataMap.end()
+            && InstRMetadata->second.PatternEnd)
             return 0;
 
         // If at the end of only one basic block, leave the rest to
@@ -292,9 +297,11 @@ int InstPatternComparator::cmpBasicBlocks(const BasicBlock *BBL,
         }
 
         // Register pattern instruction groups.
-        if (InstMetadata.GroupStart)
+        if (InstRMetadata != ParentPattern->MetadataMap.end()
+            && InstRMetadata->second.GroupStart)
             ++GroupDepth;
-        if (InstMetadata.GroupEnd)
+        if (InstRMetadata != ParentPattern->MetadataMap.end()
+            && InstRMetadata->second.GroupEnd)
             --GroupDepth;
 
         ++InstL;
@@ -408,7 +415,7 @@ int InstPatternComparator::matchPattern() const {
     // blocks that are connected by unconditional branches get trested as a
     // single basic block.
     SmallVector<const BasicBlock *, 8> FnLBBs, FnRBBs;
-    SmallPtrSet<const BasicBlock *, 32> VisitedL;
+    SmallPtrSet<const BasicBlock *, 32> VisitedL, VisitedR;
 
     // Set starting basic blocks and positions.
     FnLBBs.push_back(StartInst->getParent());
@@ -423,6 +430,7 @@ int InstPatternComparator::matchPattern() const {
 
     // Run the pattern comparison.
     VisitedL.insert(FnLBBs[0]);
+    VisitedR.insert(FnRBBs[0]);
     while (!FnLBBs.empty()) {
         const BasicBlock *BBL = FnLBBs.pop_back_val();
         const BasicBlock *BBR = FnRBBs.pop_back_val();
@@ -436,6 +444,12 @@ int InstPatternComparator::matchPattern() const {
         GroupDepth = 0;
         bool ResultFound = false;
         while (!ResultFound) {
+            // Ensure position compatibility.
+            if (PositionL->getParent() != BBL)
+                PositionL = &*BBL->begin();
+            if (PositionR->getParent() != BBR)
+                PositionR = &*BBR->begin();
+
             int ResultBB = cmpBasicBlocks(BBL, BBR);
             auto SuccL = BBL->getSingleSuccessor();
             auto SuccR = BBR->getSingleSuccessor();
@@ -452,8 +466,11 @@ int InstPatternComparator::matchPattern() const {
                 // If an unvisited single successor exists, descend into it.
                 // Otherwise finalize the comparison of the current block.
                 auto *TermR = BBR->getTerminator();
-                if (SuccR && VisitedL.insert(SuccR).second
-                    && !ParentPattern->MetadataMap[TermR].PatternEnd) {
+                auto TermRMetadata = ParentPattern->MetadataMap.find(&*TermR);
+                if (SuccR && VisitedR.insert(SuccR).second
+                    && TermRMetadata != ParentPattern->MetadataMap.end()
+                    && !TermRMetadata->second.PatternEnd
+                    && TermR->getNumSuccessors() > 0) {
                     BBR = SuccR;
                     PositionR = &*BBR->begin();
                 } else {
@@ -472,16 +489,24 @@ int InstPatternComparator::matchPattern() const {
         auto *TermL = BBL->getTerminator();
         auto *TermR = BBR->getTerminator();
 
-        // Do not descend to successors if the pattern terminating
-        // instruction is not a direct part of the pattern.
-        if (ParentPattern->MetadataMap[TermR].PatternEnd)
+        // Do not descend to successors if the pattern terminates
+        // in this basic block.
+        auto TermRMetadata = ParentPattern->MetadataMap.find(&*TermR);
+        if ((TermRMetadata != ParentPattern->MetadataMap.end()
+             && TermRMetadata->second.PatternEnd)
+            || TermR->getNumSuccessors() == 0)
             continue;
 
         // Queue all successor basic blocks.
-        assert(TermL->getNumSuccessors() == TermR->getNumSuccessors());
-        for (unsigned i = 0, e = TermL->getNumSuccessors(); i != e; ++i) {
-
-            if (!VisitedL.insert(TermL->getSuccessor(i)).second)
+        unsigned int Limit;
+        if (TermL->getNumSuccessors() < TermR->getNumSuccessors()) {
+            Limit = TermL->getNumSuccessors();
+        } else {
+            Limit = TermR->getNumSuccessors();
+        }
+        for (unsigned i = 0, e = Limit; i != e; ++i) {
+            if (!VisitedL.insert(TermL->getSuccessor(i)).second
+                || !VisitedR.insert(TermR->getSuccessor(i)).second)
                 continue;
 
             FnLBBs.push_back(TermL->getSuccessor(i));
@@ -527,13 +552,16 @@ int InstPatternComparator::checkInputMapping() const {
     // the starting instruction.
     for (auto &&BB : *FnR) {
         for (auto &&InstR : BB) {
-            // End after all input instructions have been processed.
-            if (ParentPattern->MetadataMap[&InstR].PatternStart)
-                return 0;
+            auto InstRMetadata = ParentPattern->MetadataMap.find(&InstR);
+            if (InstRMetadata != ParentPattern->MetadataMap.end()) {
+                // End after all input instructions have been processed.
+                if (InstRMetadata->second.PatternStart)
+                    return 0;
 
-            // Only analyse input instructions.
-            if (ParentPattern->MetadataMap[&InstR].NotAnInput)
-                continue;
+                // Only analyse input instructions.
+                if (InstRMetadata->second.NotAnInput)
+                    continue;
+            }
 
             auto MappedValues = InputMatchMap.find(&InstR);
             if (MappedValues != InputMatchMap.end()) {
